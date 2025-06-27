@@ -221,8 +221,8 @@ app.post('/v1/logs', async (req, res) => {
     let logsQuery = `SELECT ali.*, asli.host_name, asli.repository_path, asli.port_number, asli.version_number, asli.as_server_mode, asli.as_start_date_time, asli.as_server_config FROM ${baseQuery} ORDER BY ${orderBy} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     let countQuery = `SELECT COUNT(*) FROM ${baseQuery}`;
     // Aggregation queries
-    let groupDataQuery = groupBy ? `SELECT ali.${groupBy} as group, COUNT(*) as count FROM ${baseQuery} GROUP BY ali.${groupBy}` : null;
-    let chartDataQuery = chartBreakdownBy ? `SELECT ali.${chartBreakdownBy} as breakdown, COUNT(*) as count FROM ${baseQuery} GROUP BY ali.${chartBreakdownBy}` : null;
+    let groupDataQuery = (groupBy && groupBy !== 'none') ? `SELECT ali.${groupBy} as group, COUNT(*) as count FROM ${baseQuery} GROUP BY ali.${groupBy}` : null;
+    let chartDataQuery = (chartBreakdownBy && chartBreakdownBy !== 'none') ? `SELECT ali.${chartBreakdownBy} as breakdown, COUNT(*) as count FROM ${baseQuery} GROUP BY ali.${chartBreakdownBy}` : null;
     // Query execution
     const sqlStart = Date.now();
     const [logsResult, countResult, groupResult, chartResult] = await Promise.all([
@@ -252,6 +252,20 @@ app.post('/v1/logs', async (req, res) => {
     logDetails.query = logsQuery;
     logDetails.query_params = [...params, limit, offset];
     logDetails.input_params = req.body;
+    // After query and params are finalized, log the SQL being executed
+    const sqlLog = {
+      event: 'sql_executed',
+      time: new Date().toISOString(),
+      endpoint: req.originalUrl,
+      remote_addr: req.ip || req.connection.remoteAddress,
+      query: logsQuery || query, // logsQuery for /v1/logs, query for /query
+      query_params: [...(params || []), ...(typeof limit !== 'undefined' ? [limit] : []), ...(typeof offset !== 'undefined' ? [offset] : [])],
+      input_params: req.body
+    };
+    fs.appendFileSync(process.env.LOG_FILE || 'service.log', JSON.stringify(sqlLog) + '\n');
+    // Remove query and query_params from logDetails for the final log
+    delete logDetails.query;
+    delete logDetails.query_params;
     res.json({ logs, totalCount, groupData, chartData });
   } catch (err) {
     status = 500;
