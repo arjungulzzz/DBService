@@ -4,6 +4,8 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const fs = require('fs');
 const morgan = require('morgan');
+const compression = require('compression');
+const zlib = require('zlib');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -11,6 +13,9 @@ const port = process.env.PORT || 3001;
 // Enable CORS for all origins (customize as needed)
 app.use(cors());
 app.use(express.json());
+if (process.env.ENABLE_COMPRESSION === 'true') {
+  app.use(compression());
+}
 
 // Postgres connection config (replace with your actual credentials)
 const pool = new Pool({
@@ -36,8 +41,7 @@ app.post('/query', async (req, res) => {
     request: req.body
   };
   fs.appendFileSync(process.env.LOG_FILE || 'service.log', JSON.stringify(arrivalLog) + '\n');
-  console.log(`[${requestTime}] Incoming POST /query from ${req.ip || req.connection.remoteAddress}`);
-  const start = Date.now();
+  const apiStart = Date.now();
   let logDetails = {
     time: requestTime,
     endpoint: '/query',
@@ -51,6 +55,11 @@ app.post('/query', async (req, res) => {
   let queryStr = '';
   let paramsArr = [];
   let earlyReturn = false;
+  let compressed = false;
+  let originalSize = 0;
+  let compressedSize = 0;
+  let sqlTime = 0;
+  let compressionTime = 0;
   try {
     // Validation
     if (!req.body || (typeof req.body !== 'object')) {
@@ -81,7 +90,6 @@ app.post('/query', async (req, res) => {
     let whereClauses = [];
     let params = [];
     if (hasInterval) {
-      // Only basic validation: must be a non-empty string, assume frontend sends valid Postgres interval
       whereClauses.push(`ali.log_date_time > NOW() - INTERVAL '${req.body.interval.replace(/'/g, "''")}'`);
     } else if (hasDateRange) {
       whereClauses.push(`ali.log_date_time BETWEEN $${params.length + 1} AND $${params.length + 2}`);
@@ -91,25 +99,53 @@ app.post('/query', async (req, res) => {
       query += ' AND ' + whereClauses.join(' AND ');
     }
     query += ' ORDER BY ali.log_date_time DESC';
+    const sqlStart = Date.now();
     const result = await pool.query(query, params);
+    sqlTime = Date.now() - sqlStart;
     responseBody = JSON.stringify(result.rows);
     rowCount = result.rowCount;
     queryStr = query.replace(/\s+/g, ' ');
     paramsArr = params;
+    originalSize = Buffer.byteLength(responseBody || '', 'utf8');
+    // Check if compression is enabled and client accepts gzip
+    if (process.env.ENABLE_COMPRESSION === 'true' && (req.headers['accept-encoding'] || '').includes('gzip')) {
+      const compressionStart = Date.now();
+      compressed = true;
+      compressedSize = zlib.gzipSync(responseBody).length;
+      compressionTime = Date.now() - compressionStart;
+      res.set('X-Compressed', 'true');
+    } else {
+      res.set('X-Compressed', 'false');
+    }
     res.json(result.rows);
   } catch (err) {
     status = 500;
     error = err.message;
     responseBody = JSON.stringify({ error: err.message });
+    originalSize = Buffer.byteLength(responseBody || '', 'utf8');
+    if (process.env.ENABLE_COMPRESSION === 'true' && (req.headers['accept-encoding'] || '').includes('gzip')) {
+      const compressionStart = Date.now();
+      compressed = true;
+      compressedSize = zlib.gzipSync(responseBody).length;
+      compressionTime = Date.now() - compressionStart;
+      res.set('X-Compressed', 'true');
+    } else {
+      res.set('X-Compressed', 'false');
+    }
     if (!earlyReturn) res.status(500).json({ error: err.message });
   } finally {
-    const duration = Date.now() - start;
+    const apiTotalTime = Date.now() - apiStart;
     logDetails.status = status;
-    logDetails.duration_ms = duration;
+    logDetails.api_total_time_ms = apiTotalTime;
+    logDetails.sql_time_ms = sqlTime;
+    logDetails.compression_time_ms = compressionTime;
+    logDetails.duration_ms = apiTotalTime; // for backward compatibility
     logDetails.row_count = rowCount;
     logDetails.query = queryStr;
     logDetails.params = paramsArr;
-    logDetails.response_size = Buffer.byteLength(responseBody || '', 'utf8');
+    logDetails.response_size = originalSize;
+    logDetails.compressed = compressed;
+    logDetails.compressed_size = compressed ? compressedSize : undefined;
     if (error) logDetails.error = error;
     fs.appendFileSync(process.env.LOG_FILE || 'service.log', JSON.stringify(logDetails) + '\n');
   }
