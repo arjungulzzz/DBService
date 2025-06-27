@@ -28,6 +28,15 @@ app.use(morgan('dev'));
 // Placeholder POST endpoint
 app.post('/query', async (req, res) => {
   const requestTime = new Date().toISOString();
+  let arrivalLog = {
+    event: 'request_arrived',
+    time: requestTime,
+    endpoint: '/query',
+    remote_addr: req.ip || req.connection.remoteAddress,
+    request: req.body
+  };
+  fs.appendFileSync(process.env.LOG_FILE || 'service.log', JSON.stringify(arrivalLog) + '\n');
+  console.log(`[${requestTime}] Incoming POST /query from ${req.ip || req.connection.remoteAddress}`);
   const start = Date.now();
   let logDetails = {
     time: requestTime,
